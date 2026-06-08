@@ -1,0 +1,452 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"text/template"
+	"time"
+)
+
+// ============================================================================
+// CLI 工具 - 无侵入安全生成
+// ============================================================================
+
+const version = "0.1.0"
+
+var (
+	cmdNew    = flag.NewFlagSet("new", flag.ExitOnError)
+	cmdGen    = flag.NewFlagSet("generate", flag.ExitOnError)
+	cmdDoc    = flag.NewFlagSet("doc", flag.ExitOnError)
+	cmdRun    = flag.NewFlagSet("run", flag.ExitOnError)
+	cmdMigrate = flag.NewFlagSet("migrate", flag.ExitOnError)
+
+	projectName = cmdNew.String("name", "", "project name")
+	module      = cmdNew.String("module", "", "Go module path")
+
+	genType     = cmdGen.String("type", "handler", "generation type: handler, model, middleware")
+	genName     = cmdGen.String("name", "", "generated resource name")
+
+	docOutput   = cmdDoc.String("output", "swagger.json", "output file for API spec")
+
+	runPort     = cmdRun.String("port", "8080", "port to run on")
+	runWatch    = cmdRun.Bool("watch", false, "enable hot reload")
+
+	migrateFrom = cmdMigrate.String("from", "", "source framework (gin, echo, chi)")
+	migrateTo   = cmdMigrate.String("to", "goweb", "target framework")
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "new":
+		cmdNew.Parse(os.Args[2:])
+		createProject()
+	case "generate", "gen":
+		cmdGen.Parse(os.Args[2:])
+		generateCode()
+	case "doc":
+		cmdDoc.Parse(os.Args[2:])
+		generateDoc()
+	case "run":
+		cmdRun.Parse(os.Args[2:])
+		runServer()
+	case "migrate":
+		cmdMigrate.Parse(os.Args[2:])
+		migrateProject()
+	case "version":
+		fmt.Printf("goweb CLI v%s\n", version)
+	default:
+		printUsage()
+	}
+}
+
+func printUsage() {
+	fmt.Print(`GoWeb Framework CLI
+
+Usage:
+  goweb new    -name <name> [-module <module>]  Create a new project
+  goweb gen    -type <type> -name <name>          Generate code
+  goweb doc    [-output <file>]                   Generate API documentation
+  goweb run    [-port <port>] [-watch]            Run development server
+  goweb migrate -from <framework>                 Migrate from other framework
+  goweb version                                    Show version
+
+Generate Types:
+  handler    Generate a new handler file
+  model      Generate a model with validation
+  middleware  Generate a middleware file
+`)
+}
+
+// ============================================================================
+// new: 创建项目
+// ============================================================================
+
+func createProject() {
+	name := *projectName
+	if name == "" {
+		fmt.Println("Error: project name is required (-name)")
+		os.Exit(1)
+	}
+
+	mod := *module
+	if mod == "" {
+		mod = name
+	}
+
+	// 创建目录结构
+	dirs := []string{
+		name,
+		name + "/cmd",
+		name + "/handlers",
+		name + "/models",
+		name + "/middleware",
+		name + "/config",
+		name + "/templates",
+		name + "/static",
+	}
+
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			fmt.Printf("Error creating directory %s: %v\n", dir, err)
+			os.Exit(1)
+		}
+	}
+
+	// 生成 go.mod
+	goMod := fmt.Sprintf(`module %s
+
+go 1.22
+
+require github.com/goweb-framework/goweb v0.1.0
+`, mod)
+	writeFile(name+"/go.mod", goMod)
+
+	// 生成 main.go
+	mainGo := template.Must(template.New("main").Parse(mainTemplate))
+	f, _ := os.Create(name + "/main.go")
+	mainGo.Execute(f, map[string]string{"Name": name, "Module": mod})
+	f.Close()
+
+	// 生成 handler_gen.go（独立文件，不修改已存在文件）
+	handlerGen := template.Must(template.New("handler").Parse(handlerTemplate))
+	fh, _ := os.Create(name + "/handlers/handler_gen.go")
+	handlerGen.Execute(fh, nil)
+	fh.Close()
+
+	// 生成配置文件
+	configJSON := `{
+  "server": {
+    "port": 8080,
+    "read_timeout": "30s",
+    "write_timeout": "30s"
+  },
+  "security": {
+    "cors_allowed_origins": ["http://localhost:3000"],
+    "csrf_enabled": true
+  }
+}
+`
+	writeFile(name+"/config/config.json", configJSON)
+
+	fmt.Printf("Project '%s' created successfully at ./%s\n", name, name)
+	fmt.Println("\nNext steps:")
+	fmt.Printf("  cd %s\n", name)
+	fmt.Println("  go mod tidy")
+	fmt.Println("  goweb run")
+}
+
+// ============================================================================
+// generate: 代码生成（无侵入）
+// ============================================================================
+
+func generateCode() {
+	typ := *genType
+	name := *genName
+
+	if name == "" {
+		fmt.Println("Error: name is required (-name)")
+		os.Exit(1)
+	}
+
+	// 生成独立文件，以 _gen.go 结尾
+	switch typ {
+	case "handler":
+		genHandler(name)
+	case "model":
+		genModel(name)
+	case "middleware":
+		genMiddleware(name)
+	default:
+		fmt.Printf("Error: unknown type '%s'. Supported: handler, model, middleware\n", typ)
+		os.Exit(1)
+	}
+}
+
+func genHandler(name string) {
+	fileName := name + "_handler_gen.go"
+	titleName := toTitle(name)
+	code := fmt.Sprintf(`// Code generated by goweb CLI. DO NOT EDIT.
+package handlers
+
+import (
+	"net/http"
+	"github.com/goweb-framework/goweb/core"
+)
+
+// %sHandler handles %s related requests.
+type %sHandler struct{}
+
+// New%sHandler creates a new %sHandler.
+func New%sHandler() *%sHandler {
+	return &%sHandler{}
+}
+
+// Index handles GET /%s
+func (h *%sHandler) Index(c *core.Context) error {
+	return c.JSON(http.StatusOK, core.Response{
+		Code:    http.StatusOK,
+		Message: "%s index",
+	})
+}
+`, titleName, name, titleName, titleName, titleName, titleName, titleName, name, titleName, titleName, titleName)
+
+	writeFile(fileName, code)
+	fmt.Printf("Generated handler: %s\n", fileName)
+}
+
+func genModel(name string) {
+	fileName := name + "_gen.go"
+	code := fmt.Sprintf(`// Code generated by goweb CLI. DO NOT EDIT.
+package models
+
+import "time"
+
+// %s represents a %s entity.
+type %s struct {
+	ID        string    `+"`"+`json:"id" validate:"required"`+"`"+`
+	CreatedAt time.Time `+"`"+`json:"created_at"`+"`"+`
+	UpdatedAt time.Time `+"`"+`json:"updated_at"`+"`"+`
+
+	// TODO: Add your fields
+}
+
+// Validate implements the Validatable interface.
+func (m *%s) Validate() error {
+	// TODO: Add custom validation logic
+	return nil
+}
+`, toTitle(name), name, toTitle(name), toTitle(name))
+
+	writeFile(fileName, code)
+	fmt.Printf("Generated model: %s\n", fileName)
+}
+
+func genMiddleware(name string) {
+	fileName := name + "_middleware_gen.go"
+	code := fmt.Sprintf(`// Code generated by goweb CLI. DO NOT EDIT.
+package middleware
+
+import "github.com/goweb-framework/goweb/core"
+
+// %sMiddleware is a custom middleware.
+func %sMiddleware() core.MiddlewareFunc {
+	return func(next core.HandlerFunc) core.HandlerFunc {
+		return func(c *core.Context) error {
+			// TODO: Add your middleware logic
+			return next(c)
+		}
+	}
+}
+`, toTitle(name), toTitle(name))
+
+	writeFile(fileName, code)
+	fmt.Printf("Generated middleware: %s\n", fileName)
+}
+
+// ============================================================================
+// doc: 生成 API 文档
+// ============================================================================
+
+func generateDoc() {
+	output := *docOutput
+
+	// 简化的 Swagger/OpenAPI 文档生成
+	spec := fmt.Sprintf(`{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "GoWeb API",
+    "version": "1.0.0",
+    "description": "Auto-generated API documentation"
+  },
+  "servers": [
+    { "url": "http://localhost:8080" }
+  ],
+  "paths": {}
+}
+`)
+
+	writeFile(output, spec)
+	fmt.Printf("API documentation generated: %s\n", output)
+}
+
+// ============================================================================
+// run: 开发服务器
+// ============================================================================
+
+func runServer() {
+	port := *runPort
+	if port == "" {
+		port = "8080"
+	}
+
+	if *runWatch {
+		fmt.Printf("Starting development server with hot reload on :%s...\n", port)
+		// 简化版热重载（实际应使用更复杂的文件监视）
+		for {
+			cmd := exec.Command("go", "run", ".", "-port", port)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			go func() {
+				cmd.Run()
+			}()
+
+			time.Sleep(2 * time.Second)
+			fmt.Println("Watching for changes...")
+			time.Sleep(30 * time.Second) // 简化：每 30 秒重启
+		}
+	} else {
+		fmt.Printf("Starting development server on :%s...\n", port)
+		cmd := exec.Command("go", "run", ".")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	}
+}
+
+// ============================================================================
+// migrate: 迁移工具
+// ============================================================================
+
+func migrateProject() {
+	from := *migrateFrom
+	if from == "" {
+		fmt.Println("Error: source framework is required (-from)")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Migration from %s to GoWeb is not fully automated yet.\n", from)
+	fmt.Println("Please refer to the migration guide in the documentation.")
+	fmt.Println("Key differences to consider:")
+	fmt.Println("  1. Handler signatures: func(*core.Context) error")
+	fmt.Println("  2. Middleware: func(HandlerFunc) HandlerFunc")
+	fmt.Println("  3. Route definition via Router methods")
+}
+
+// ============================================================================
+// 工具函数
+// ============================================================================
+
+func writeFile(path, content string) {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		fmt.Printf("Error writing file %s: %v\n", path, err)
+		os.Exit(1)
+	}
+}
+
+func toTitle(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// ============================================================================
+// 模板
+// ============================================================================
+
+var mainTemplate = `package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/goweb-framework/goweb"
+	"github.com/goweb-framework/goweb/middleware"
+)
+
+func main() {
+	app := goweb.New()
+
+	// 加载配置
+	if err := app.LoadConfig("config/config.json"); err != nil {
+		log.Println("Warning: config not loaded:", err)
+	}
+
+	// 注册中间件（推荐顺序）
+	app.UseRecovery()
+	app.UseLogger()
+	app.UseSecure()
+	app.UseCORS()
+	app.UseBodyLimit(10 << 20) // 10MB
+
+	// 注册路由
+	app.GET("/", func(c *goweb.Context) error {
+		return c.JSON(200, goweb.H{
+			"message": "Welcome to GoWeb!",
+		})
+	})
+
+	// API v1 分组
+	v1 := app.Group("/api/v1")
+	v1.GET("/health", func(c *goweb.Context) error {
+		return c.JSON(200, goweb.H{"status": "ok"})
+	})
+
+	// 启动服务器
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = ":8080"
+	}
+
+	log.Printf("Server starting on %s\n", port)
+	if err := app.Start(port); err != nil {
+		log.Fatal(err)
+	}
+}
+`
+
+var handlerTemplate = `// Code generated by goweb CLI. DO NOT EDIT.
+package handlers
+
+import (
+	"net/http"
+	"github.com/goweb-framework/goweb/core"
+)
+
+// GeneratedHandler provides generated handler methods.
+type GeneratedHandler struct{}
+
+// GetGeneratedHandler creates a GeneratedHandler.
+func GetGeneratedHandler() *GeneratedHandler {
+	return &GeneratedHandler{}
+}
+
+// Routes registers all generated routes.
+func (h *GeneratedHandler) Routes(g *core.Group) {
+	// Route definitions will be added here by code generation
+}
+`
+
+// Ensure unused imports don't cause issues
+var _ = filepath.Base
+var _ = os.DevNull

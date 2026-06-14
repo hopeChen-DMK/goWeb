@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hopechen-dmk/goWeb/core"
-	"github.com/hopechen-dmk/goWeb/files"
-	"github.com/hopechen-dmk/goWeb/middleware"
-	"github.com/hopechen-dmk/goWeb/security"
-	"github.com/hopechen-dmk/goWeb/server"
+	"github.com/hopechen-dmk/goweb/core"
+	"github.com/hopechen-dmk/goweb/files"
+	"github.com/hopechen-dmk/goweb/middleware"
+	"github.com/hopechen-dmk/goweb/security"
+	"github.com/hopechen-dmk/goweb/server"
 )
 
 // ============================================================================

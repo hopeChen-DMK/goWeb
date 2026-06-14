@@ -1,4 +1,4 @@
-module github.com/hopechen-dmk/goWeb
+module github.com/hopechen-dmk/goweb
 
 go 1.22
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hopechen-dmk/goWeb/core"
+	"github.com/hopechen-dmk/goweb/core"
 )
 
 // ============================================================================

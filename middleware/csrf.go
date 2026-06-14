@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hopechen-dmk/goWeb/core"
+	"github.com/hopechen-dmk/goweb/core"
 )
 
 // ============================================================================

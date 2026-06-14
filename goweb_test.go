@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/goweb-framework/goweb/core"
+	"github.com/hopeChen-DMK/goWeb/core"
 )
 
 // ============================================================================

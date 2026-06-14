@@ -1,4 +1,4 @@
-module github.com/goweb-framework/goweb
+module github.com/hopeChen-DMK/goWeb
 
 go 1.22
 

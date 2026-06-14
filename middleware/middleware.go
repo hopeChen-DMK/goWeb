@@ -12,7 +12,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/goweb-framework/goweb/core"
+	"github.com/hopeChen-DMK/goWeb/core"
 )
 
 // ============================================================================

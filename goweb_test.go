@@ -3,15 +3,162 @@ package goweb
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/hopechen-dmk/goweb/core"
+	"github.com/hopechen-dmk/goweb/middleware"
 )
 
 // ============================================================================
 // 路由测试
 // ============================================================================
+
+func TestWaitForSignalWaitsForServerInit(t *testing.T) {
+	app := New()
+
+	start := time.Now()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		app.signalServerReady()
+	}()
+
+	select {
+	case <-app.serverReady:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server ready signal")
+	}
+
+	if time.Since(start) < 40*time.Millisecond {
+		t.Error("server ready signal should wait for Start initialization")
+	}
+}
+
+func TestHandlerReturnErrorWritesResponse(t *testing.T) {
+	app := New()
+	app.Init()
+
+	app.GET("/err", func(c *Context) error {
+		return core.NewHTTPError(http.StatusBadRequest, "bad input")
+	})
+
+	req := httptest.NewRequest("GET", "/err", nil)
+	rec := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("bad input")) {
+		t.Fatalf("expected error body, got %s", rec.Body.String())
+	}
+}
+
+func TestBindAndValidateUsesStructTags(t *testing.T) {
+	app := New()
+	app.Init()
+
+	type validateReq struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+
+	app.POST("/validate", func(c *Context) error {
+		var body validateReq
+		if err := c.BindAndValidate(&body); err != nil {
+			return err
+		}
+		return c.JSON(200, core.Map{"ok": true})
+	})
+
+	httpReq := httptest.NewRequest("POST", "/validate", bytes.NewReader([]byte(`{"email":"not-an-email"}`)))
+	httpReq.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec, httpReq)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStaticFileServing(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "app.js")
+	if err := os.WriteFile(filePath, []byte("console.log('ok')"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New()
+	app.Init()
+	app.Static("/public", dir)
+
+	req := httptest.NewRequest("GET", "/public/app.js", nil)
+	rec := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "console.log('ok')" {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestSessionPersistence(t *testing.T) {
+	app := New()
+	app.UseSession(middleware.DefaultSessionConfig())
+	app.Init()
+
+	app.GET("/set", func(c *Context) error {
+		c.Session()["count"] = 1
+		return c.String(200, "set")
+	})
+	app.GET("/get", func(c *Context) error {
+		count, _ := c.Session()["count"].(int)
+		return c.JSON(200, core.Map{"count": count})
+	})
+
+	// 第一次请求设置 session
+	req1 := httptest.NewRequest("GET", "/set", nil)
+	rec1 := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec1, req1)
+
+	cookies := rec1.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected session cookie")
+	}
+
+	// 第二次请求携带 cookie 读取 session
+	req2 := httptest.NewRequest("GET", "/get", nil)
+	for _, cookie := range cookies {
+		req2.AddCookie(cookie)
+	}
+	rec2 := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec2, req2)
+
+	var resp map[string]int
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["count"] != 1 {
+		t.Fatalf("expected session count 1, got %d", resp["count"])
+	}
+}
+
+func TestInitIsIdempotent(t *testing.T) {
+	app := New()
+	app.UseRecovery()
+	app.Init()
+	mwCount := app.Router.GlobalMiddlewareCount()
+
+	app.Init()
+	if app.Router.GlobalMiddlewareCount() != mwCount {
+		t.Fatalf("Init should not duplicate middleware: before=%d after=%d", mwCount, app.Router.GlobalMiddlewareCount())
+	}
+}
 
 func TestRouterBasic(t *testing.T) {
 	app := New()

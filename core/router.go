@@ -1,7 +1,10 @@
 package core
 
 import (
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -97,6 +100,9 @@ type RadixRouter struct {
 
 	// 路由就绪标志
 	routesReady bool
+
+	// 请求级日志器（由 App 注入）
+	logger Logger
 
 	// 路由元数据（用于文档生成）
 	routeMeta []RouteMeta
@@ -220,11 +226,25 @@ func (r *RadixRouter) ANY(path string, handler HandlerFunc, mw ...MiddlewareFunc
 	return r
 }
 
+// SetLogger 设置请求级日志器，会在每个请求开始时注入到 Context。
+func (r *RadixRouter) SetLogger(logger Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logger = logger
+}
+
 // Use 注册全局中间件。
 func (r *RadixRouter) Use(mw ...MiddlewareFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.globalMiddleware = append(r.globalMiddleware, mw...)
+}
+
+// GlobalMiddlewareCount 返回已注册的全局中间件数量。
+func (r *RadixRouter) GlobalMiddlewareCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.globalMiddleware)
 }
 
 // Group 创建路由组。
@@ -588,6 +608,11 @@ func (r *RadixRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		r.mu.RUnlock()
 	}
 
+	// 静态文件优先
+	if r.serveStatic(w, req) {
+		return
+	}
+
 	result := r.find(req.Method, req.URL.Path)
 
 	if result == nil {
@@ -650,6 +675,10 @@ func (r *RadixRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *RadixRouter) executeWithMiddleware(c *Context, handler HandlerFunc, middlewares []MiddlewareFunc) {
+	if r.logger != nil {
+		c.SetLogger(r.logger)
+	}
+
 	// 洋葱模型：从前往后，最后一层是实际 handler
 	final := handler
 	for i := len(middlewares) - 1; i >= 0; i-- {
@@ -658,7 +687,89 @@ func (r *RadixRouter) executeWithMiddleware(c *Context, handler HandlerFunc, mid
 	// 执行
 	if err := final(c); err != nil {
 		c.SetError(err)
+		if !c.written {
+			writeHandlerError(c, err)
+		}
 	}
+}
+
+func writeHandlerError(c *Context, err error) {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		resp := Response{
+			Code:    httpErr.Code,
+			Message: httpErr.Message,
+		}
+		if httpErr.Data != nil {
+			resp.Data = httpErr.Data
+		}
+		_ = c.JSON(httpErr.Code, resp)
+		return
+	}
+	_ = c.JSON(http.StatusInternalServerError, Response{
+		Code:    http.StatusInternalServerError,
+		Message: err.Error(),
+	})
+}
+
+func (r *RadixRouter) serveStatic(w http.ResponseWriter, req *http.Request) bool {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return false
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	path := req.URL.Path
+	var bestPrefix, bestRoot string
+	for prefix, root := range r.staticRoutes {
+		matchPrefix := prefix
+		if matchPrefix != "/" && !strings.HasSuffix(matchPrefix, "/") {
+			if path == matchPrefix || strings.HasPrefix(path, matchPrefix+"/") {
+				if len(matchPrefix) > len(bestPrefix) {
+					bestPrefix = matchPrefix
+					bestRoot = root
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(path, matchPrefix) {
+			if len(matchPrefix) > len(bestPrefix) {
+				bestPrefix = matchPrefix
+				bestRoot = root
+			}
+		}
+	}
+
+	if bestPrefix == "" {
+		return false
+	}
+
+	relPath := strings.TrimPrefix(path, bestPrefix)
+	relPath = strings.TrimPrefix(relPath, "/")
+	if relPath == "" {
+		relPath = "index.html"
+	}
+
+	filePath := filepath.Join(bestRoot, filepath.Clean("/"+relPath))
+	absRoot, err := filepath.Abs(bestRoot)
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return true
+	}
+	absFile, err := filepath.Abs(filePath)
+	if err != nil || !strings.HasPrefix(absFile, absRoot+string(os.PathSeparator)) && absFile != absRoot {
+		http.NotFound(w, req)
+		return true
+	}
+
+	if _, err := os.Stat(absFile); err != nil {
+		http.NotFound(w, req)
+		return true
+	}
+
+	http.ServeFile(w, req, absFile)
+	return true
 }
 
 func (r *RadixRouter) getAllowedMethods(path string) string {

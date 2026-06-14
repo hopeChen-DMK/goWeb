@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -85,7 +86,8 @@ func SendFile(c *core.Context, filePath string, config ...DownloadConfig) error 
 
 	// 检查 If-None-Match
 	if match := c.GetHeader("If-None-Match"); match != "" && match == etag {
-		return c.NoContent()
+		c.SetHeader("ETag", etag)
+		return c.Empty(http.StatusNotModified)
 	}
 
 	// 设置文件名

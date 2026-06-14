@@ -232,21 +232,46 @@ func (s *Server) handleReadyz(c *core.Context) error {
 			Message: "not ready",
 		})
 	}
-	if s.config.HealthDetails {
-		// 调试模式下的依赖列表
-		deps := s.getDependencyStatus()
-		status := "ok"
-		for _, dep := range deps {
-			if dep.Status != "ok" {
-				status = "degraded"
-			}
+
+	failed := s.runReadinessChecks()
+	if len(failed) > 0 {
+		if s.config.HealthDetails {
+			return c.JSON(http.StatusServiceUnavailable, core.H{
+				"status":       "fail",
+				"dependencies": failed,
+			})
 		}
+		return c.JSON(http.StatusServiceUnavailable, core.Response{
+			Code:    http.StatusServiceUnavailable,
+			Message: "not ready",
+		})
+	}
+
+	if s.config.HealthDetails {
+		deps := s.getDependencyStatus()
 		return c.JSON(http.StatusOK, core.H{
-			"status":       status,
+			"status":       "ok",
 			"dependencies": deps,
 		})
 	}
 	return c.String(http.StatusOK, "ok")
+}
+
+func (s *Server) runReadinessChecks() []dependency {
+	s.readinessMu.RLock()
+	checks := make(map[string]func() error, len(s.readinessChecks))
+	for name, check := range s.readinessChecks {
+		checks[name] = check
+	}
+	s.readinessMu.RUnlock()
+
+	var failed []dependency
+	for name, check := range checks {
+		if err := check(); err != nil {
+			failed = append(failed, dependency{Name: name, Status: "fail"})
+		}
+	}
+	return failed
 }
 
 type dependency struct {
@@ -1046,10 +1071,11 @@ func (r *CustomMetricsRegistry) SnapshotCustom() map[string]*CustomMetric {
 
 // ConfigWatcher 配置文件监听器。
 type ConfigWatcher struct {
-	path    string
+	path     string
 	onReload func(path string) error
-	stopCh  chan struct{}
-	logger  core.Logger
+	stopCh   chan struct{}
+	logger   core.Logger
+	stopOnce sync.Once
 }
 
 // NewConfigWatcher 创建配置监听器。
@@ -1102,7 +1128,9 @@ func (w *ConfigWatcher) Start() {
 
 // Stop 停止配置监听。
 func (w *ConfigWatcher) Stop() {
-	close(w.stopCh)
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+	})
 }
 
 // SetConfigWatcher 设置配置文件监听器。

@@ -115,7 +115,7 @@ func toSlogLevel(l LogLevel) slog.Level {
 
 // DynamicLevelHandler 支持运行时动态调整日志级别。
 type DynamicLevelHandler struct {
-	levelVar slog.LevelVar
+	levelVar *slog.LevelVar
 	handler  slog.Handler
 }
 
@@ -139,7 +139,7 @@ func NewDynamicLogger(w io.Writer, level LogLevel, useJSON bool) *DynamicLevelHa
 	}
 
 	return &DynamicLevelHandler{
-		levelVar: levelVar,
+		levelVar: &levelVar,
 		handler:  handler,
 	}
 }

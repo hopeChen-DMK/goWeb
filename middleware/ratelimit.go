@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -138,6 +139,9 @@ func (s *memoryLimiterStore) Allow(key string, rate int, burst int, period time.
 	}
 
 	// 计算需要等待的时间
+	if bucket.rate <= 0 {
+		return false, 0, fmt.Errorf("rate limiter: rate must be positive")
+	}
 	waitTime := time.Duration((1-bucket.tokens)/bucket.rate*1000) * time.Millisecond
 	return false, waitTime, nil
 }

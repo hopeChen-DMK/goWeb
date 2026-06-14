@@ -46,8 +46,23 @@ type App struct {
 	// 国际化翻译
 	translations sync.Map // map[string]map[string]string
 
+	// Start 前暂存的服务器配置
+	pendingReadinessChecks map[string]func() error
+	pendingRouterHooks     []core.LifecycleHook
+	pendingConfigPath      string
+	pendingConfigReload    func(path string) error
+	startConfigWatcher     bool
+
 	// 状态
 	initialized bool
+	serverReady chan struct{}
+	serverOnce  sync.Once
+}
+
+type structValidator struct{}
+
+func (structValidator) Validate(v interface{}) error {
+	return security.ValidateStruct(v)
 }
 
 // New 创建新的 App 实例。
@@ -59,7 +74,10 @@ func New() *App {
 		Router:      router,
 		Config:      cfg,
 		middlewares: make([]core.MiddlewareFunc, 0),
+		serverReady: make(chan struct{}),
 	}
+
+	core.SetDefaultValidator(structValidator{})
 
 	// 设置默认日志
 	logger := core.NewLogger(os.Stdout, core.LogLevelInfo)
@@ -218,7 +236,10 @@ func (app *App) UseRequestSignature(config middleware.SignatureConfig) {
 
 // Init 初始化应用（注册全局中间件到路由器）。
 func (app *App) Init() {
-	// 按推荐顺序注册中间件
+	if app.initialized {
+		return
+	}
+	app.Router.SetLogger(app.Logger)
 	app.Router.Use(app.middlewares...)
 	app.initialized = true
 }
@@ -236,6 +257,8 @@ func (app *App) Start(addr string) error {
 
 	app.Server = server.New(app.Router, cfg)
 	app.Server.SetLogger(app.Logger)
+	app.applyPendingServerConfig()
+	app.signalServerReady()
 
 	return app.Server.Start()
 }
@@ -246,12 +269,62 @@ func (app *App) StartWithConfig(cfg *server.ServerConfig) error {
 
 	app.Server = server.New(app.Router, cfg)
 	app.Server.SetLogger(app.Logger)
+	app.applyPendingServerConfig()
+	app.signalServerReady()
 
 	return app.Server.Start()
 }
 
+// StartTLS 以 TLS 模式启动 HTTP 服务器。
+func (app *App) StartTLS(addr, certFile, keyFile string) error {
+	app.Init()
+
+	cfg := server.DefaultServerConfig()
+	cfg.Addr = addr
+
+	app.Server = server.New(app.Router, cfg)
+	app.Server.SetLogger(app.Logger)
+	app.applyPendingServerConfig()
+	app.signalServerReady()
+
+	return app.Server.StartTLS(certFile, keyFile)
+}
+
+func (app *App) signalServerReady() {
+	app.serverOnce.Do(func() {
+		close(app.serverReady)
+	})
+}
+
+func (app *App) applyPendingServerConfig() {
+	if app.Server == nil {
+		return
+	}
+	for name, check := range app.pendingReadinessChecks {
+		app.Server.RegisterReadinessCheck(name, check)
+	}
+	for _, hook := range app.pendingRouterHooks {
+		app.Server.OnRouterReady(hook)
+	}
+	if app.pendingConfigPath != "" && app.pendingConfigReload != nil {
+		app.Server.SetConfigWatcher(app.pendingConfigPath, app.pendingConfigReload)
+	}
+	if app.startConfigWatcher {
+		app.Server.StartConfigWatcher()
+	}
+}
+
 // WaitForSignal 等待信号并优雅关闭。
+// 若 Start 在 goroutine 中异步调用，会等待 Server 初始化完成后再阻塞。
 func (app *App) WaitForSignal() {
+	select {
+	case <-app.serverReady:
+	case <-time.After(30 * time.Second):
+		if app.Logger != nil {
+			app.Logger.Error("WaitForSignal: server not started within 30s")
+		}
+		return
+	}
 	if app.Server != nil {
 		app.Server.WaitForSignal()
 	}
@@ -261,28 +334,40 @@ func (app *App) WaitForSignal() {
 func (app *App) RegisterReadinessCheck(name string, check func() error) {
 	if app.Server != nil {
 		app.Server.RegisterReadinessCheck(name, check)
+		return
 	}
+	if app.pendingReadinessChecks == nil {
+		app.pendingReadinessChecks = make(map[string]func() error)
+	}
+	app.pendingReadinessChecks[name] = check
 }
 
 // OnRouterReady 注册路由就绪钩子。
 func (app *App) OnRouterReady(hook core.LifecycleHook) {
 	if app.Server != nil {
 		app.Server.OnRouterReady(hook)
+		return
 	}
+	app.pendingRouterHooks = append(app.pendingRouterHooks, hook)
 }
 
 // SetConfigWatcher 设置配置文件热更新监听。
 func (app *App) SetConfigWatcher(path string, onReload func(path string) error) {
 	if app.Server != nil {
 		app.Server.SetConfigWatcher(path, onReload)
+		return
 	}
+	app.pendingConfigPath = path
+	app.pendingConfigReload = onReload
 }
 
 // StartConfigWatcher 启动配置热更新监听。
 func (app *App) StartConfigWatcher() {
 	if app.Server != nil {
 		app.Server.StartConfigWatcher()
+		return
 	}
+	app.startConfigWatcher = true
 }
 
 // Shutdown 优雅关闭服务器。
@@ -307,12 +392,22 @@ func (app *App) SetTemplateFunc(name string, fn interface{}) {
 
 // LoadTemplates 加载模板文件。
 func (app *App) LoadTemplates(pattern string) error {
-	app.tplFuncs = make(template.FuncMap)
-	// 内置函数
-	app.tplFuncs["upper"] = strings.ToUpper
-	app.tplFuncs["lower"] = strings.ToLower
-	app.tplFuncs["title"] = strings.Title
-	app.tplFuncs["now"] = func() string { return time.Now().Format(time.RFC3339) }
+	if app.tplFuncs == nil {
+		app.tplFuncs = make(template.FuncMap)
+	}
+	// 内置函数（不覆盖用户自定义）
+	if _, ok := app.tplFuncs["upper"]; !ok {
+		app.tplFuncs["upper"] = strings.ToUpper
+	}
+	if _, ok := app.tplFuncs["lower"]; !ok {
+		app.tplFuncs["lower"] = strings.ToLower
+	}
+	if _, ok := app.tplFuncs["title"]; !ok {
+		app.tplFuncs["title"] = strings.Title
+	}
+	if _, ok := app.tplFuncs["now"]; !ok {
+		app.tplFuncs["now"] = func() string { return time.Now().Format(time.RFC3339) }
+	}
 
 	app.templates = template.Must(template.New("").Funcs(app.tplFuncs).ParseGlob(pattern))
 	return nil

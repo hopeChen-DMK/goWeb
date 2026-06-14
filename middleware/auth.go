@@ -159,16 +159,26 @@ func AuthChain(auths ...core.MiddlewareFunc) core.MiddlewareFunc {
 				}
 
 				err := auth(innerNext)(c)
-				if err == nil {
+				if c.IsAuthenticated() {
 					return next(c)
 				}
 
-				lastErr = err
+				if err != nil {
+					lastErr = err
+				} else if c.Written() {
+					lastErr = fmt.Errorf("authentication failed")
+				}
 				// 重置认证信息尝试下一个
 				c.SetAuth(nil)
 			}
 
 			// 所有策略都失败
+			if lastErr == nil {
+				lastErr = fmt.Errorf("authentication failed")
+			}
+			if c.Written() {
+				return nil
+			}
 			return c.JSON(http.StatusUnauthorized, core.Response{
 				Code:    http.StatusUnauthorized,
 				Message: "Authentication failed: " + lastErr.Error(),
@@ -262,9 +272,11 @@ func Session(config SessionConfig) core.MiddlewareFunc {
 			err = next(c)
 
 			// 请求完成后持久化会话
-			if saveErr := config.Store.Save(sessionID); saveErr != nil {
-				if c.Logger() != nil {
-					c.Logger().Error("failed to save session", "error", saveErr)
+			if sessionData := c.Session(); sessionData != nil {
+				if setErr := config.Store.Set(sessionID, sessionData, config.MaxAge); setErr != nil {
+					if c.Logger() != nil {
+						c.Logger().Error("failed to persist session", "error", setErr)
+					}
 				}
 			}
 

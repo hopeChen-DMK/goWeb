@@ -6,7 +6,7 @@
 package middleware
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -294,26 +294,19 @@ type TimeoutConfig struct {
 func Timeout(d time.Duration) core.MiddlewareFunc {
 	return func(next core.HandlerFunc) core.HandlerFunc {
 		return func(c *core.Context) error {
-			done := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(c.Request.Context(), d)
+			defer cancel()
 
-			go func() {
-				defer func() {
-					if p := core.RecoverPanic(); p != nil {
-						done <- fmt.Errorf("handler panic: %v", p.Value)
-					}
-				}()
-				done <- next(c)
-			}()
+			c.Request = c.Request.WithContext(ctx)
+			err := next(c)
 
-			select {
-			case err := <-done:
-				return err
-			case <-time.After(d):
+			if ctx.Err() == context.DeadlineExceeded && !c.Written() {
 				return c.JSON(http.StatusServiceUnavailable, core.Response{
 					Code:    http.StatusServiceUnavailable,
 					Message: "Request timeout",
 				})
 			}
+			return err
 		}
 	}
 }

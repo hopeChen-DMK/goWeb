@@ -46,6 +46,8 @@ type CSRFConfig struct {
 	Secret []byte
 	// FingerprintSalt 指纹盐值（SPA 模式）
 	FingerprintSalt string
+	// Secure Cookie Secure 标志
+	Secure bool
 }
 
 // DefaultCSRFConfig 返回 CSRF 默认配置。
@@ -79,8 +81,9 @@ func CSRF(config ...CSRFConfig) core.MiddlewareFunc {
 
 	return func(next core.HandlerFunc) core.HandlerFunc {
 		return func(c *core.Context) error {
-			// GET/HEAD/OPTIONS/TRACE 不需要 CSRF
+			// 安全方法：签发 token 供后续变更请求使用
 			if skipMethods[c.Method()] {
+				ensureCSRFCookie(c, cfg)
 				return next(c)
 			}
 
@@ -91,16 +94,7 @@ func CSRF(config ...CSRFConfig) core.MiddlewareFunc {
 			if err != nil || cookieToken.Value == "" {
 				// 生成新 token
 				token = generateCSRFToken(cfg)
-				cookie := &http.Cookie{
-					Name:     cfg.CookieName,
-					Value:    token,
-					Path:     "/",
-					MaxAge:   int(cfg.MaxAge.Seconds()),
-					HttpOnly: cfg.Mode == CSRFModeCookie, // SPA 模式下设为 false
-					Secure:   true,
-					SameSite: http.SameSiteLaxMode,
-				}
-				c.SetCookie(cookie)
+				setCSRFCookie(c, cfg, token)
 			} else {
 				token = cookieToken.Value
 			}
@@ -135,6 +129,27 @@ func CSRF(config ...CSRFConfig) core.MiddlewareFunc {
 			return next(c)
 		}
 	}
+}
+
+func ensureCSRFCookie(c *core.Context, cfg CSRFConfig) {
+	cookieToken, err := c.Cookie(cfg.CookieName)
+	if err == nil && cookieToken.Value != "" {
+		return
+	}
+	setCSRFCookie(c, cfg, generateCSRFToken(cfg))
+}
+
+func setCSRFCookie(c *core.Context, cfg CSRFConfig, token string) {
+	cookie := &http.Cookie{
+		Name:     cfg.CookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(cfg.MaxAge.Seconds()),
+		HttpOnly: cfg.Mode == CSRFModeCookie,
+		Secure:   cfg.Secure,
+		SameSite: http.SameSiteLaxMode,
+	}
+	c.SetCookie(cookie)
 }
 
 // generateCSRFToken 生成 CSRF token。

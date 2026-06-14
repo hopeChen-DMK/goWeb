@@ -172,6 +172,9 @@ func AuthJWT(config ...JWTConfig) core.MiddlewareFunc {
 	if len(config) > 0 {
 		cfg = config[0]
 	}
+	if cfg.Algorithm == JWTAlgHS256 && len(cfg.Secret) == 0 {
+		panic("AuthJWT: Secret is required for HS256")
+	}
 
 	// 解析提取位置
 	extractors := parseTokenExtractors(cfg.TokenLookup)
@@ -208,15 +211,19 @@ func AuthJWT(config ...JWTConfig) core.MiddlewareFunc {
 
 			// 检查黑名单
 			if cfg.Blocklist != nil {
-				if jti, ok := token.Claims.Get("jti"); ok {
-					if jtiStr, ok := jti.(string); ok {
-						if cfg.Blocklist.IsBlocked(jtiStr) {
-							return c.JSON(http.StatusUnauthorized, core.Response{
-								Code:    http.StatusUnauthorized,
-								Message: "Token has been revoked",
-							})
-						}
+				jti := ""
+				if sc, ok := token.Claims.(*StandardClaims); ok && sc.ID != "" {
+					jti = sc.ID
+				} else if v, ok := token.Claims.Get("jti"); ok {
+					if jtiStr, ok := v.(string); ok {
+						jti = jtiStr
 					}
+				}
+				if jti != "" && cfg.Blocklist.IsBlocked(jti) {
+					return c.JSON(http.StatusUnauthorized, core.Response{
+						Code:    http.StatusUnauthorized,
+						Message: "Token has been revoked",
+					})
 				}
 			}
 
@@ -352,7 +359,11 @@ func verifySignature(alg, signingString, signature string, key interface{}) erro
 
 	switch alg {
 	case JWTAlgHS256:
-		mac := hmac.New(sha256.New, key.([]byte))
+		secret, ok := key.([]byte)
+		if !ok || len(secret) == 0 {
+			return errors.New("missing or invalid HMAC secret")
+		}
+		mac := hmac.New(sha256.New, secret)
 		mac.Write([]byte(signingString))
 		if !hmac.Equal(mac.Sum(nil), sigBytes) {
 			return errors.New("signature invalid")

@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -281,6 +282,11 @@ func (c *Context) StatusCode() int {
 	return c.statusCode
 }
 
+// Written 返回是否已写入响应。
+func (c *Context) Written() bool {
+	return c.written
+}
+
 // JSON 发送 JSON 响应。
 func (c *Context) JSON(code int, data any) error {
 	c.Status(code)
@@ -324,8 +330,13 @@ func (c *Context) HTML(code int, html string) error {
 
 // NoContent 发送 204 无内容响应。
 func (c *Context) NoContent() error {
-	c.Status(http.StatusNoContent)
-	c.responseWriter.WriteHeader(http.StatusNoContent)
+	return c.Empty(http.StatusNoContent)
+}
+
+// Empty 发送指定状态码的无内容响应。
+func (c *Context) Empty(code int) error {
+	c.Status(code)
+	c.responseWriter.WriteHeader(code)
 	c.written = true
 	return nil
 }
@@ -473,6 +484,13 @@ func (c *Context) BindAndValidate(v interface{}) error {
 		}
 	}
 
+	// 使用全局 validate tag 验证器
+	if defaultValidator != nil {
+		if err := defaultValidator.Validate(v); err != nil {
+			return NewHTTPError(http.StatusUnprocessableEntity, err.Error())
+		}
+	}
+
 	return nil
 }
 
@@ -486,10 +504,10 @@ func (c *Context) GetRawBody() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Request.Body.Close()
 
 	c.bodyCache = body
 	c.bodyRead = true
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
 	return body, nil
 }
